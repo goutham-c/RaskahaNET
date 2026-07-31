@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Disaster Rescue App</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  body { margin: 0; font-family: Arial, sans-serif; display: flex; height: 100vh; }
+  #map { flex: 2; }
+  #sidebar { flex: 1; display: flex; flex-direction: column; padding: 12px; background: #111; color: #eee; min-width: 320px; }
+  h2 { margin-top: 0; font-size: 18px; }
+  select, input, textarea, button { width: 100%; margin: 6px 0; padding: 8px; box-sizing: border-box; }
+  button { cursor: pointer; background: #2563eb; color: white; border: none; border-radius: 4px; }
+  #sos-btn { background: #dc2626; font-weight: bold; }
+  #chat-log { flex: 1; overflow-y: auto; background: #1a1a1a; padding: 8px; border-radius: 4px; margin: 8px 0; font-size: 13px; }
+  .msg { margin-bottom: 10px; }
+  .msg.user { color: #93c5fd; }
+  .msg.bot { color: #86efac; }
+  #alerts { background: #3f1d1d; padding: 8px; border-radius: 4px; font-size: 12px; max-height: 100px; overflow-y: auto; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="sidebar">
+  <h2>🚨 Disaster Rescue Assistant</h2>
+
+  <label>Disaster type</label>
+  <select id="disaster-type">
+    <option value="earthquake">Earthquake</option>
+    <option value="cyclone">Cyclone</option>
+  </select>
+
+  <div id="alerts">Loading live alerts...</div>
+
+  <div id="chat-log"></div>
+  <textarea id="chat-input" rows="2" placeholder="Describe your situation..."></textarea>
+  <input type="file" id="image-input" accept="image/*" />
+  <button id="send-btn">Send to Assistant</button>
+
+  <button id="sos-btn">🆘 SEND SOS</button>
+  <div style="font-size:11px; color:#999; margin-top:4px;">
+    Location is pinged automatically every 15s while this page is open.
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const API_BASE = "http://localhost:8000";
+const USER_ID = "user_" + Math.random().toString(36).slice(2, 8);
+
+const map = L.map('map').setView([17.385, 78.4867], 5); // default: India
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+let myMarker = null;
+let quakeMarkers = [];
+
+// ---- Live location tracking ----
+function pingLocation(lat, lng) {
+  fetch(`${API_BASE}/ping`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: USER_ID, lat, lng, signal_type: "gps" })
+  }).catch(err => console.error("ping failed", err));
+
+  if (myMarker) {
+    myMarker.setLatLng([lat, lng]);
+  } else {
+    myMarker = L.marker([lat, lng]).addTo(map).bindPopup("You are here").openPopup();
+    map.setView([lat, lng], 13);
+  }
+}
+
+function trackLocation() {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(
+    pos => pingLocation(pos.coords.latitude, pos.coords.longitude),
+    err => console.warn("Geolocation error:", err.message)
+  );
+}
+trackLocation();
+setInterval(trackLocation, 15000);
+
+// ---- SOS ----
+document.getElementById("sos-btn").onclick = () => {
+  navigator.geolocation.getCurrentPosition(pos => {
+    fetch(`${API_BASE}/sos`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: USER_ID,
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        message: "SOS triggered from app"
+      })
+    }).then(() => alert("SOS sent! Rescue team will see your last known location."));
+  });
+};
+
+// ---- Chat assistant (RAG + Gemma) ----
+const chatLog = document.getElementById("chat-log");
+
+function addMsg(text, cls) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.textContent = (cls === "user" ? "You: " : "Assistant: ") + text;
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+document.getElementById("send-btn").onclick = async () => {
+  const message = document.getElementById("chat-input").value.trim();
+  const disasterType = document.getElementById("disaster-type").value;
+  const imageFile = document.getElementById("image-input").files[0];
+  if (!message) return;
+
+  addMsg(message, "user");
+  document.getElementById("chat-input").value = "";
+
+  const formData = new FormData();
+  formData.append("disaster_type", disasterType);
+  formData.append("message", message);
+  if (imageFile) formData.append("image", imageFile);
+
+  addMsg("Thinking...", "bot");
+  try {
+    const res = await fetch(`${API_BASE}/analyze`, { method: "POST", body: formData });
+    const data = await res.json();
+    chatLog.removeChild(chatLog.lastChild);
+    addMsg(data.response || data.error || "No response", "bot");
+  } catch (err) {
+    chatLog.removeChild(chatLog.lastChild);
+    addMsg("Error contacting assistant: " + err.message, "bot");
+  }
+};
+
+// ---- Live earthquake alerts ----
+async function loadAlerts() {
+  try {
+    const res = await fetch(`${API_BASE}/alerts/earthquake`);
+    const data = await res.json();
+    const alertsDiv = document.getElementById("alerts");
+
+    quakeMarkers.forEach(m => map.removeLayer(m));
+    quakeMarkers = [];
+
+    if (data.quakes && data.quakes.length) {
+      alertsDiv.innerHTML = `⚠️ ${data.count} recent earthquakes (M4.5+) worldwide`;
+      data.quakes.slice(0, 30).forEach(q => {
+        const marker = L.circleMarker([q.lat, q.lng], {
+          radius: Math.max(4, q.magnitude * 2),
+          color: "red"
+        }).bindPopup(`M${q.magnitude} - ${q.place}`).addTo(map);
+        quakeMarkers.push(marker);
+      });
+    } else {
+      alertsDiv.innerHTML = "No major earthquake alerts right now.";
+    }
+  } catch (err) {
+    document.getElementById("alerts").innerHTML = "Could not load alerts.";
+  }
+}
+loadAlerts();
+setInterval(loadAlerts, 60000);
+</script>
+
+</body>
+</html>
