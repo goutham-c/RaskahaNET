@@ -108,5 +108,5 @@ python -m http.server 5500
 ```
 
 ## Team
-Built by [Your Names] for Neonexus 36.1 — Build with Gemma Hackathon, IEEE Young
+Built by goutham & siddesh for Neonexus 36.1 — Build with Gemma Hackathon, IEEE Young
 Professionals Bangalore Section.
